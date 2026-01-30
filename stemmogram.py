@@ -14,10 +14,10 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 STEMS = ["vocals", "other", "bass", "drums"]
 STEM_COLORS = {
-    "vocals": (255, 140, 0),
-    "bass": (0, 80, 255),
-    "drums": (140, 140, 140),
-    "other": (0, 200, 0),
+    "vocals": (207, 46, 46),
+    "bass": (30, 80, 180),
+    "drums": (180, 120, 0),
+    "other": (0, 145, 110),
 }
 WIDTH = 1920
 SPEC_HEIGHT = 250
@@ -44,13 +44,14 @@ def parse_args():
 
 def extract_metadata(input_path: str) -> dict:
     """Extract duration, bitrate via ffprobe and loudness via ffmpeg ebur128."""
-    # Duration and bitrate
+    # Duration, bitrate, and sample rate
     result = subprocess.run(
         [
             "ffprobe",
             "-v", "quiet",
             "-print_format", "json",
             "-show_format",
+            "-show_streams",
             input_path,
         ],
         capture_output=True,
@@ -61,6 +62,15 @@ def extract_metadata(input_path: str) -> dict:
     fmt = info.get("format", {})
     duration_s = float(fmt.get("duration", 0))
     bitrate_bps = int(fmt.get("bit_rate", 0))
+
+    # Sample rate from first audio stream
+    sample_rate = "N/A"
+    for stream in info.get("streams", []):
+        if stream.get("codec_type") == "audio":
+            sr = stream.get("sample_rate")
+            if sr:
+                sample_rate = f"{int(sr) // 1000}kHz" if int(sr) >= 1000 else f"{sr}Hz"
+            break
 
     minutes = int(duration_s // 60)
     seconds = int(duration_s % 60)
@@ -88,11 +98,39 @@ def extract_metadata(input_path: str) -> dict:
     except Exception:
         pass
 
+    # Mean and max volume via volumedetect
+    mean_volume = "N/A"
+    max_volume = "N/A"
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-i", input_path,
+                "-af", "volumedetect",
+                "-f", "null",
+                "-",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        stderr = result.stderr
+        match_mean = re.search(r"mean_volume:\s+([-\d.]+)\s+dB", stderr)
+        match_max = re.search(r"max_volume:\s+([-\d.]+)\s+dB", stderr)
+        if match_mean:
+            mean_volume = f"{float(match_mean.group(1)):.1f} dB"
+        if match_max:
+            max_volume = f"{float(match_max.group(1)):.1f} dB"
+    except Exception:
+        pass
+
     return {
         "duration": duration_str,
         "duration_s": duration_s,
         "bitrate_kbps": bitrate_kbps,
         "loudness": loudness_str,
+        "sample_rate": sample_rate,
+        "mean_volume": mean_volume,
+        "max_volume": max_volume,
     }
 
 
@@ -195,8 +233,26 @@ def create_header(filename: str, metadata: dict) -> Image.Image:
     name = Path(filename).stem
     draw.text((20, 10), name, fill="black", font=font)
 
-    stats = f"Duration: {metadata['duration']}    Loudness: {metadata['loudness']}    Bitrate: {metadata['bitrate_kbps']} kbps"
+    stats = (
+        f"Duration: {metadata['duration']}    "
+        f"Loudness: {metadata['loudness']}    "
+        f"Bitrate: {metadata['bitrate_kbps']} kbps    "
+        f"Sample rate: {metadata['sample_rate']}    "
+        f"Mean vol: {metadata['mean_volume']}    "
+        f"Max vol: {metadata['max_volume']}"
+    )
     draw.text((20, 46), stats, fill="gray", font=label_font)
+
+    # Project reference in top-right corner
+    ref_size = 14
+    try:
+        ref_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", ref_size)
+    except OSError:
+        ref_font = ImageFont.load_default()
+    ref_text = "pforret/stemmogram"
+    ref_bbox = draw.textbbox((0, 0), ref_text, font=ref_font)
+    ref_w = ref_bbox[2] - ref_bbox[0]
+    draw.text((WIDTH - ref_w - 20, 10), ref_text, fill="gray", font=ref_font)
 
     return header
 
@@ -217,6 +273,11 @@ def compose_stemmogram(header: Image.Image, spectrograms: list, duration_s: floa
     for i, spec in enumerate(spectrograms):
         y = HEADER_HEIGHT + i * SPEC_HEIGHT
         final.paste(spec, (0, y))
+        # White shadow for readability over dark waveforms
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                if dx or dy:
+                    draw.text((10 + dx, y + 6 + dy), STEMS[i], fill="white", font=label_font)
         draw.text((10, y + 6), STEMS[i], fill="black", font=label_font)
 
     # Draw semi-transparent time markers every 30 seconds

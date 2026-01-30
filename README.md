@@ -35,8 +35,11 @@ The output PNG appears in `./output/song_stemmogram.png`.
 stemmogram /input/song.mp3                    # spectrogram (default)
 stemmogram /input/song.mp3 --waveform         # waveform instead of spectrogram
 stemmogram /input/song.mp3 --both             # waveform + spectrogram combined
-stemmogram /input/song.mp3 -o /output         # explicit output directory
+stemmogram /input/song.mp3 -o result.png      # custom output filename (in /output)
+stemmogram /input/song.mp3 -o result          # same (.png appended automatically)
 ```
+
+Output files are always written to `/output`. Without `-o`, the filename is auto-generated from the input name and mode (e.g. `song_stemmogram.png`, `song_waveform.png`, `song_both.png`).
 
 ## Output
 

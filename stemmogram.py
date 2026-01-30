@@ -10,13 +10,13 @@ import sys
 import tempfile
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 STEMS = ["vocals", "other", "bass", "drums"]
 STEM_COLORS = {
-    "vocals": (255, 255, 0),
+    "vocals": (255, 140, 0),
     "bass": (0, 80, 255),
-    "drums": (255, 50, 0),
+    "drums": (140, 140, 140),
     "other": (0, 200, 0),
 }
 WIDTH = 1920
@@ -31,7 +31,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Generate a stemmogram from an MP3 file.")
     parser.add_argument("input", help="Path to input MP3 file")
     parser.add_argument(
-        "--output", "-o", default="/output", help="Output directory (default: /output)"
+        "--output", "-o", default=None, help="Output filename (placed in /output)"
     )
     parser.add_argument(
         "--waveform", action="store_true", help="Render waveforms instead of spectrograms"
@@ -90,6 +90,7 @@ def extract_metadata(input_path: str) -> dict:
 
     return {
         "duration": duration_str,
+        "duration_s": duration_s,
         "bitrate_kbps": bitrate_kbps,
         "loudness": loudness_str,
     }
@@ -130,7 +131,7 @@ def generate_spectrogram(wav_path: str, output_png: str, height: int = SPEC_HEIG
             "ffmpeg",
             "-y",
             "-i", wav_path,
-            "-lavfi", f"showspectrumpic=s={WIDTH}x{height}:legend=0",
+            "-lavfi", f"showspectrumpic=s={WIDTH}x{height}:legend=0:start=18:stop=18000:win_func=hann:scale=log:fscale=log",
             output_png,
         ],
         capture_output=True,
@@ -145,7 +146,7 @@ def generate_waveform(wav_path: str, output_png: str, height: int = SPEC_HEIGHT)
             "ffmpeg",
             "-y",
             "-i", wav_path,
-            "-lavfi", f"showwavespic=s={WIDTH}x{height}:colors=white",
+            "-lavfi", f"showwavespic=s={WIDTH}x{height}:colors=white:scale=log",
             output_png,
         ],
         capture_output=True,
@@ -154,21 +155,22 @@ def generate_waveform(wav_path: str, output_png: str, height: int = SPEC_HEIGHT)
 
 
 def tint_spectrogram(png_path: str, color: tuple, height: int = SPEC_HEIGHT) -> Image.Image:
-    """Load a spectrogram, convert to grayscale, and tint with the given RGB color."""
+    """Load a spectrogram, invert to white background, and tint with the given RGB color."""
     img = Image.open(png_path).convert("L")  # grayscale
     img = img.resize((WIDTH, height), Image.LANCZOS)
+    img = ImageOps.invert(img)  # black-on-white: silence=255, loud=0
 
-    # Create RGB image by multiplying grayscale intensity with the color
-    r_channel = img.point(lambda p: int(p * color[0] / 255))
-    g_channel = img.point(lambda p: int(p * color[1] / 255))
-    b_channel = img.point(lambda p: int(p * color[2] / 255))
+    # Map: 0 (loud) -> stem color, 255 (silence) -> white
+    r_channel = img.point(lambda p: int(color[0] + p * (255 - color[0]) / 255))
+    g_channel = img.point(lambda p: int(color[1] + p * (255 - color[1]) / 255))
+    b_channel = img.point(lambda p: int(color[2] + p * (255 - color[2]) / 255))
 
     return Image.merge("RGB", (r_channel, g_channel, b_channel))
 
 
 def combine_stem_strips(wave_img: Image.Image, spec_img: Image.Image) -> Image.Image:
     """Stack a waveform and spectrogram strip with a gap into a SPEC_HEIGHT-tall image."""
-    combined = Image.new("RGB", (WIDTH, SPEC_HEIGHT), "black")
+    combined = Image.new("RGB", (WIDTH, SPEC_HEIGHT), "white")
     combined.paste(wave_img, (0, 0))
     combined.paste(spec_img, (0, BOTH_STRIP_HEIGHT + BOTH_GAP))
     return combined
@@ -196,31 +198,49 @@ def create_header(filename: str, metadata: dict) -> Image.Image:
     stats = f"Duration: {metadata['duration']}    Loudness: {metadata['loudness']}    Bitrate: {metadata['bitrate_kbps']} kbps"
     draw.text((20, 46), stats, fill="gray", font=label_font)
 
-    # Stem color legend on the right side
-    legend_x = WIDTH - 500
-    for i, stem in enumerate(STEMS):
-        x = legend_x + i * 120
-        color = STEM_COLORS[stem]
-        draw.rectangle([x, 12, x + 14, 26], fill=color)
-        draw.text((x + 20, 8), stem, fill="black", font=label_font)
-
     return header
 
 
-def compose_stemmogram(header: Image.Image, spectrograms: list) -> Image.Image:
+def compose_stemmogram(header: Image.Image, spectrograms: list, duration_s: float) -> Image.Image:
     """Stack header + 4 spectrograms into a 1920x1080 image."""
-    final = Image.new("RGB", (WIDTH, TOTAL_HEIGHT), "black")
+    final = Image.new("RGB", (WIDTH, TOTAL_HEIGHT), "white")
     final.paste(header, (0, 0))
+
+    try:
+        label_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 20)
+        time_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14)
+    except OSError:
+        label_font = ImageFont.load_default()
+        time_font = label_font
+
+    draw = ImageDraw.Draw(final)
     for i, spec in enumerate(spectrograms):
         y = HEADER_HEIGHT + i * SPEC_HEIGHT
         final.paste(spec, (0, y))
+        draw.text((10, y + 6), STEMS[i], fill="black", font=label_font)
+
+    # Draw semi-transparent time markers every 30 seconds
+    if duration_s > 0:
+        overlay = Image.new("RGBA", (WIDTH, TOTAL_HEIGHT), (0, 0, 0, 0))
+        overlay_draw = ImageDraw.Draw(overlay)
+        t = 30
+        while t < duration_s:
+            x = int(t / duration_s * WIDTH)
+            overlay_draw.line([(x, HEADER_HEIGHT), (x, TOTAL_HEIGHT)], fill=(0, 0, 0, 64), width=1)
+            minutes = int(t // 60)
+            seconds = int(t % 60)
+            label = f"{minutes}:{seconds:02d}"
+            overlay_draw.text((x - 30, TOTAL_HEIGHT - 18), label, fill=(0, 0, 0, 128), font=time_font)
+            t += 30
+        final = Image.alpha_composite(final.convert("RGBA"), overlay).convert("RGB")
+
     return final
 
 
 def main():
     args = parse_args()
     input_path = args.input
-    output_dir = args.output
+    output_dir = "/output"
 
     if not os.path.isfile(input_path):
         print(f"ERROR: Input file not found: {input_path}", file=sys.stderr)
@@ -277,17 +297,21 @@ def main():
 
         # Step 5: Compose final image
         print("Compositing stemmogram...")
-        final = compose_stemmogram(header, tinted)
+        final = compose_stemmogram(header, tinted, metadata["duration_s"])
 
         # Step 6: Save output
-        basename = Path(input_path).stem
-        if args.both:
-            suffix = "_both"
-        elif args.waveform:
-            suffix = "_waveform"
+        if args.output:
+            filename = args.output if args.output.endswith(".png") else args.output + ".png"
+            output_path = os.path.join(output_dir, os.path.basename(filename))
         else:
-            suffix = "_stemmogram"
-        output_path = os.path.join(output_dir, f"{basename}{suffix}.png")
+            basename = Path(input_path).stem
+            if args.both:
+                suffix = "_both"
+            elif args.waveform:
+                suffix = "_waveform"
+            else:
+                suffix = "_stemmogram"
+            output_path = os.path.join(output_dir, f"{basename}{suffix}.png")
         final.save(output_path)
         print(f"Saved: {output_path}")
 

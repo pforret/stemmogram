@@ -45,6 +45,8 @@ Output files are always written to `/output`. Without `-o`, the filename is auto
 
 All modes produce a 1920x1080 PNG with an 80px header + 4 × 250px stem strips.
 
+![Example stemmogram](assets/example.png)
+
 ### Default (spectrogram)
 
 Output: `song_stemmogram.png`

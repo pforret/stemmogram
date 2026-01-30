@@ -1,0 +1,7 @@
+input/
+output/
+.git
+__pycache__
+*.mp3
+*.wav
+*.png

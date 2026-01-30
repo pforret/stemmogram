@@ -23,6 +23,8 @@ WIDTH = 1920
 SPEC_HEIGHT = 250
 HEADER_HEIGHT = 80
 TOTAL_HEIGHT = HEADER_HEIGHT + len(STEMS) * SPEC_HEIGHT  # 1080
+BOTH_STRIP_HEIGHT = 120
+BOTH_GAP = 10
 
 
 def parse_args():
@@ -30,6 +32,12 @@ def parse_args():
     parser.add_argument("input", help="Path to input MP3 file")
     parser.add_argument(
         "--output", "-o", default="/output", help="Output directory (default: /output)"
+    )
+    parser.add_argument(
+        "--waveform", action="store_true", help="Render waveforms instead of spectrograms"
+    )
+    parser.add_argument(
+        "--both", action="store_true", help="Render waveform + spectrogram combined per stem"
     )
     return parser.parse_args()
 
@@ -115,14 +123,14 @@ def separate_stems(input_path: str, tmp_dir: str) -> dict:
     return stem_paths
 
 
-def generate_spectrogram(wav_path: str, output_png: str):
+def generate_spectrogram(wav_path: str, output_png: str, height: int = SPEC_HEIGHT):
     """Generate a spectrogram PNG using ffmpeg showspectrumpic."""
     subprocess.run(
         [
             "ffmpeg",
             "-y",
             "-i", wav_path,
-            "-lavfi", f"showspectrumpic=s={WIDTH}x{SPEC_HEIGHT}:legend=0",
+            "-lavfi", f"showspectrumpic=s={WIDTH}x{height}:legend=0",
             output_png,
         ],
         capture_output=True,
@@ -130,10 +138,25 @@ def generate_spectrogram(wav_path: str, output_png: str):
     )
 
 
-def tint_spectrogram(png_path: str, color: tuple) -> Image.Image:
+def generate_waveform(wav_path: str, output_png: str, height: int = SPEC_HEIGHT):
+    """Generate a waveform PNG using ffmpeg showwavespic."""
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-i", wav_path,
+            "-lavfi", f"showwavespic=s={WIDTH}x{height}:colors=white",
+            output_png,
+        ],
+        capture_output=True,
+        check=True,
+    )
+
+
+def tint_spectrogram(png_path: str, color: tuple, height: int = SPEC_HEIGHT) -> Image.Image:
     """Load a spectrogram, convert to grayscale, and tint with the given RGB color."""
     img = Image.open(png_path).convert("L")  # grayscale
-    img = img.resize((WIDTH, SPEC_HEIGHT), Image.LANCZOS)
+    img = img.resize((WIDTH, height), Image.LANCZOS)
 
     # Create RGB image by multiplying grayscale intensity with the color
     r_channel = img.point(lambda p: int(p * color[0] / 255))
@@ -141,6 +164,14 @@ def tint_spectrogram(png_path: str, color: tuple) -> Image.Image:
     b_channel = img.point(lambda p: int(p * color[2] / 255))
 
     return Image.merge("RGB", (r_channel, g_channel, b_channel))
+
+
+def combine_stem_strips(wave_img: Image.Image, spec_img: Image.Image) -> Image.Image:
+    """Stack a waveform and spectrogram strip with a gap into a SPEC_HEIGHT-tall image."""
+    combined = Image.new("RGB", (WIDTH, SPEC_HEIGHT), "black")
+    combined.paste(wave_img, (0, 0))
+    combined.paste(spec_img, (0, BOTH_STRIP_HEIGHT + BOTH_GAP))
+    return combined
 
 
 def create_header(filename: str, metadata: dict) -> Image.Image:
@@ -209,16 +240,36 @@ def main():
         print("Separating stems with htdemucs...")
         stem_paths = separate_stems(input_path, tmp_dir)
 
-        # Step 3: Generate and tint spectrograms
+        # Step 3: Generate and tint spectrograms/waveforms
         tinted = []
+        if args.both:
+            mode = "both"
+        elif args.waveform:
+            mode = "waveform"
+        else:
+            mode = "spectrogram"
         for stem in STEMS:
-            print(f"  Generating spectrogram: {stem}...")
-            spec_png = os.path.join(tmp_dir, f"{stem}_spec.png")
-            generate_spectrogram(stem_paths[stem], spec_png)
-
-            print(f"  Tinting: {stem} -> {STEM_COLORS[stem]}")
-            tinted_img = tint_spectrogram(spec_png, STEM_COLORS[stem])
-            tinted.append(tinted_img)
+            print(f"  Generating {mode}: {stem}...")
+            color = STEM_COLORS[stem]
+            if args.both:
+                wave_png = os.path.join(tmp_dir, f"{stem}_wave.png")
+                spec_png = os.path.join(tmp_dir, f"{stem}_spec.png")
+                generate_waveform(stem_paths[stem], wave_png, BOTH_STRIP_HEIGHT)
+                generate_spectrogram(stem_paths[stem], spec_png, BOTH_STRIP_HEIGHT)
+                print(f"  Tinting: {stem} -> {color}")
+                wave_img = tint_spectrogram(wave_png, color, BOTH_STRIP_HEIGHT)
+                spec_img = tint_spectrogram(spec_png, color, BOTH_STRIP_HEIGHT)
+                tinted.append(combine_stem_strips(wave_img, spec_img))
+            elif args.waveform:
+                png_path = os.path.join(tmp_dir, f"{stem}_wave.png")
+                generate_waveform(stem_paths[stem], png_path)
+                print(f"  Tinting: {stem} -> {color}")
+                tinted.append(tint_spectrogram(png_path, color))
+            else:
+                png_path = os.path.join(tmp_dir, f"{stem}_spec.png")
+                generate_spectrogram(stem_paths[stem], png_path)
+                print(f"  Tinting: {stem} -> {color}")
+                tinted.append(tint_spectrogram(png_path, color))
 
         # Step 4: Create header
         print("Creating header...")
@@ -230,7 +281,13 @@ def main():
 
         # Step 6: Save output
         basename = Path(input_path).stem
-        output_path = os.path.join(output_dir, f"{basename}_stemmogram.png")
+        if args.both:
+            suffix = "_both"
+        elif args.waveform:
+            suffix = "_waveform"
+        else:
+            suffix = "_stemmogram"
+        output_path = os.path.join(output_dir, f"{basename}{suffix}.png")
         final.save(output_path)
         print(f"Saved: {output_path}")
 

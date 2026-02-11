@@ -48,7 +48,7 @@ docker run --rm -v "$(pwd)/input:/input" -v "$(pwd)/output:/output" stemmogram /
 - **htdemucs** outputs 4 WAV files: `vocals.wav`, `bass.wav`, `drums.wav`, `other.wav`
 - **ffmpeg spectrogram**: `ffmpeg -i stem.wav -lavfi showspectrumpic=s=1920x250:scale=log output.png`
 - **ffmpeg waveform**: `ffmpeg -i stem.wav -lavfi showwavespic=s=1920x250:scale=log output.png`
-- **Options**: `--visual=spectro,wave` (default), `spectro`, `wave`, `mel`; `--scale=log` (default) or `lin`
+- **Options**: `--visual=spectro,wave` (default), `spectro`, `wave`, `mel`; `--scale=cbrt` (default), `log`, `sqrt`, or `lin`
 - Color tinting is applied per-stem after visualization generation
 - The header bar uses audio metadata extracted via `ffprobe` (duration, bitrate) and `ffmpeg` loudness scanning (`ebur128`)
 - Final image dimensions: 1920x1080 (80px header + 4x250px strips)

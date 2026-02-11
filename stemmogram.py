@@ -10,14 +10,23 @@ import sys
 import tempfile
 from pathlib import Path
 
+import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 STEMS = ["vocals", "other", "bass", "drums"]
-STEM_COLORS = {
-    "vocals": (207, 46, 46),
-    "bass": (30, 80, 180),
-    "drums": (180, 120, 0),
-    "other": (0, 145, 110),
+COLOR_PALETTES = {
+    "simple": {
+        "vocals": (207, 46, 46),
+        "bass": (30, 80, 180),
+        "drums": (180, 120, 0),
+        "other": (0, 145, 110),
+    },
+    "ocean": {
+        "vocals": (155, 34, 38),    # 9b2226
+        "bass": (0, 95, 115),       # 005f73
+        "drums": (238, 155, 0),     # ee9b00
+        "other": (10, 147, 150),    # 0a9396
+    },
 }
 WIDTH = 1920
 SPEC_HEIGHT = 250
@@ -34,10 +43,16 @@ def parse_args():
         "--output", "-o", default=None, help="Output filename (placed in /output)"
     )
     parser.add_argument(
-        "--waveform", action="store_true", help="Render waveforms instead of spectrograms"
+        "--visual", default="spectro,wave",
+        help="Visualization mode: spectro, wave, spectro,wave, or mel (default: spectro,wave)"
     )
     parser.add_argument(
-        "--both", action="store_true", help="Render waveform + spectrogram combined per stem"
+        "--scale", default="log", choices=["lin", "log"],
+        help="Scaling method for waveform/spectrogram: lin or log (default: log)"
+    )
+    parser.add_argument(
+        "--colors", default="simple", choices=list(COLOR_PALETTES.keys()),
+        help="Color palette: simple or ocean (default: simple)"
     )
     return parser.parse_args()
 
@@ -162,14 +177,14 @@ def separate_stems(input_path: str, tmp_dir: str) -> dict:
     return stem_paths
 
 
-def generate_spectrogram(wav_path: str, output_png: str, height: int = SPEC_HEIGHT):
+def generate_spectrogram(wav_path: str, output_png: str, height: int = SPEC_HEIGHT, scale: str = "log"):
     """Generate a spectrogram PNG using ffmpeg showspectrumpic."""
     subprocess.run(
         [
             "ffmpeg",
             "-y",
             "-i", wav_path,
-            "-lavfi", f"showspectrumpic=s={WIDTH}x{height}:legend=0:start=18:stop=18000:win_func=hann:scale=log:fscale=log",
+            "-lavfi", f"showspectrumpic=s={WIDTH}x{height}:legend=0:start=18:stop=18000:win_func=hann:scale={scale}:fscale=log",
             output_png,
         ],
         capture_output=True,
@@ -177,19 +192,44 @@ def generate_spectrogram(wav_path: str, output_png: str, height: int = SPEC_HEIG
     )
 
 
-def generate_waveform(wav_path: str, output_png: str, height: int = SPEC_HEIGHT):
+def generate_waveform(wav_path: str, output_png: str, height: int = SPEC_HEIGHT, scale: str = "log"):
     """Generate a waveform PNG using ffmpeg showwavespic."""
     subprocess.run(
         [
             "ffmpeg",
             "-y",
             "-i", wav_path,
-            "-lavfi", f"showwavespic=s={WIDTH}x{height}:colors=white:scale=log",
+            "-lavfi", f"showwavespic=s={WIDTH}x{height}:colors=white:scale={scale}",
             output_png,
         ],
         capture_output=True,
         check=True,
     )
+
+
+def generate_melspectrogram(wav_path: str, output_png: str, height: int = SPEC_HEIGHT):
+    """Generate a mel spectrogram PNG using librosa."""
+    import librosa
+
+    y, sr = librosa.load(wav_path, sr=44100)
+    S = librosa.feature.melspectrogram(
+        y=y, sr=sr, n_mels=128, n_fft=2048, hop_length=512, fmin=20, fmax=20000,
+    )
+    S_dB = librosa.power_to_db(S, ref=np.max)
+
+    # Normalize to 0-255 (S_dB ranges from ~-80 to 0)
+    s_min, s_max = S_dB.min(), S_dB.max()
+    if s_max > s_min:
+        mel_norm = (S_dB - s_min) / (s_max - s_min) * 255
+    else:
+        mel_norm = np.zeros_like(S_dB)
+
+    # Flip vertically so low frequencies are at the bottom
+    mel_img = np.flipud(mel_norm).astype(np.uint8)
+
+    img = Image.fromarray(mel_img, mode='L')
+    img = img.resize((WIDTH, height), Image.LANCZOS)
+    img.save(output_png)
 
 
 def tint_spectrogram(png_path: str, color: tuple, height: int = SPEC_HEIGHT) -> Image.Image:
@@ -323,32 +363,41 @@ def main():
 
         # Step 3: Generate and tint spectrograms/waveforms
         tinted = []
-        if args.both:
+        visual = args.visual.lower()
+        if visual == "spectro,wave" or visual == "wave,spectro":
             mode = "both"
-        elif args.waveform:
+        elif visual == "wave":
             mode = "waveform"
+        elif visual == "mel":
+            mode = "melspectrogram"
         else:
             mode = "spectrogram"
+        palette = COLOR_PALETTES[args.colors]
         for stem in STEMS:
             print(f"  Generating {mode}: {stem}...")
-            color = STEM_COLORS[stem]
-            if args.both:
+            color = palette[stem]
+            if mode == "both":
                 wave_png = os.path.join(tmp_dir, f"{stem}_wave.png")
                 spec_png = os.path.join(tmp_dir, f"{stem}_spec.png")
-                generate_waveform(stem_paths[stem], wave_png, BOTH_STRIP_HEIGHT)
-                generate_spectrogram(stem_paths[stem], spec_png, BOTH_STRIP_HEIGHT)
+                generate_waveform(stem_paths[stem], wave_png, BOTH_STRIP_HEIGHT, args.scale)
+                generate_spectrogram(stem_paths[stem], spec_png, BOTH_STRIP_HEIGHT, args.scale)
                 print(f"  Tinting: {stem} -> {color}")
                 wave_img = tint_spectrogram(wave_png, color, BOTH_STRIP_HEIGHT)
                 spec_img = tint_spectrogram(spec_png, color, BOTH_STRIP_HEIGHT)
                 tinted.append(combine_stem_strips(wave_img, spec_img))
-            elif args.waveform:
+            elif mode == "waveform":
                 png_path = os.path.join(tmp_dir, f"{stem}_wave.png")
-                generate_waveform(stem_paths[stem], png_path)
+                generate_waveform(stem_paths[stem], png_path, SPEC_HEIGHT, args.scale)
+                print(f"  Tinting: {stem} -> {color}")
+                tinted.append(tint_spectrogram(png_path, color))
+            elif mode == "melspectrogram":
+                png_path = os.path.join(tmp_dir, f"{stem}_mel.png")
+                generate_melspectrogram(stem_paths[stem], png_path)
                 print(f"  Tinting: {stem} -> {color}")
                 tinted.append(tint_spectrogram(png_path, color))
             else:
                 png_path = os.path.join(tmp_dir, f"{stem}_spec.png")
-                generate_spectrogram(stem_paths[stem], png_path)
+                generate_spectrogram(stem_paths[stem], png_path, SPEC_HEIGHT, args.scale)
                 print(f"  Tinting: {stem} -> {color}")
                 tinted.append(tint_spectrogram(png_path, color))
 
@@ -366,10 +415,12 @@ def main():
             output_path = os.path.join(output_dir, os.path.basename(filename))
         else:
             basename = Path(input_path).stem
-            if args.both:
+            if mode == "both":
                 suffix = "_both"
-            elif args.waveform:
+            elif mode == "waveform":
                 suffix = "_waveform"
+            elif mode == "melspectrogram":
+                suffix = "_melspectrogram"
             else:
                 suffix = "_stemmogram"
             output_path = os.path.join(output_dir, f"{basename}{suffix}.png")

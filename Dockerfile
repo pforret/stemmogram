@@ -10,8 +10,8 @@ RUN apt-get update && \
 
 # Install Python dependencies (CPU-only PyTorch to keep image smaller)
 RUN pip install --no-cache-dir \
-    torch torchaudio --index-url https://download.pytorch.org/whl/cpu && \
-    pip install --no-cache-dir demucs Pillow soundfile
+    torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir demucs Pillow soundfile numpy librosa
 
 # Pre-download the htdemucs model so it's cached in the image
 RUN python3 -c "from demucs.pretrained import get_model; get_model('htdemucs')"

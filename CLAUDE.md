@@ -9,9 +9,9 @@ Stemmogram is a Dockerized audio visualization tool. It takes an MP3 file as inp
 ### Pipeline
 
 1. **Stem separation** — split MP3 into 4 stems (vocals, bass, drums, other) using `htdemucs` (from the `demucs` package)
-2. **Spectrogram generation** — create a 1920x250 spectrogram PNG for each stem using `ffmpeg`
-3. **Color mapping** — each stem gets a distinct color: vocals=yellow, bass=blue, drums=red, other=green
-4. **Compositing** — stack the 4 spectrograms vertically (1920x1000), then add a 1920x80 header bar (black text on white) showing filename, duration, loudness, and bitrate
+2. **Visualization** — create 1920x250 spectrogram/waveform/both per stem using `ffmpeg` (configurable via `--visual`)
+3. **Color mapping** — each stem gets a distinct color: vocals=red, bass=blue, drums=orange, other=green
+4. **Compositing** — stack the 4 strips vertically (1920x1000), then add a 1920x80 header bar showing filename, duration, loudness, and bitrate
 5. **Output** — final 1920x1080 PNG stemmogram
 
 ## Architecture
@@ -46,10 +46,12 @@ docker run --rm -v "$(pwd)/input:/input" -v "$(pwd)/output:/output" stemmogram /
 ## Key Technical Details
 
 - **htdemucs** outputs 4 WAV files: `vocals.wav`, `bass.wav`, `drums.wav`, `other.wav`
-- **ffmpeg spectrogram**: `ffmpeg -i stem.wav -lavfi showspectrumpic=s=1920x250 output.png`
-- Color tinting is applied per-stem after spectrogram generation
-- The header bar uses audio metadata extracted via `ffprobe` (duration, bitrate) and `ffmpeg` loudness scanning (`loudnorm` filter or `ebur128`)
-- Final image dimensions: 1920x1080 (80px header + 4x250px spectrograms)
+- **ffmpeg spectrogram**: `ffmpeg -i stem.wav -lavfi showspectrumpic=s=1920x250:scale=log output.png`
+- **ffmpeg waveform**: `ffmpeg -i stem.wav -lavfi showwavespic=s=1920x250:scale=log output.png`
+- **Options**: `--visual=spectro,wave` (default), `spectro`, `wave`, `mel`; `--scale=log` (default) or `lin`
+- Color tinting is applied per-stem after visualization generation
+- The header bar uses audio metadata extracted via `ffprobe` (duration, bitrate) and `ffmpeg` loudness scanning (`ebur128`)
+- Final image dimensions: 1920x1080 (80px header + 4x250px strips)
 
 ## Design Constraints
 

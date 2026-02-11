@@ -3,10 +3,14 @@ set -euo pipefail
 
 IMAGE="${IMAGE:-stemmogram}"
 INPUT="${INPUT:-/input/test.mp3}"
+CACHE_ID="${CACHE_ID:-test}"
 
-VISUALS=("spectro" "wave" "spectro,wave" "mel")
-SCALES=("lin" "log")
-COLORS=("simple" "ocean")
+VISUALS=("spectro,wave")
+SCALES=("lin" "log" "sqrt" "cbrt")
+COLORS=("simple")
+
+# Create cache directory if needed
+mkdir -p "$(pwd)/cache"
 
 # Build
 echo "=== Building Docker image ==="
@@ -24,10 +28,12 @@ for visual in "${VISUALS[@]}"; do
       docker run --rm \
         -v "$(pwd)/input:/input" \
         -v "$(pwd)/output:/output" \
+        -v "$(pwd)/cache:/cache" \
         "$IMAGE" "$INPUT" \
         --visual="$visual" \
         --scale="$scale" \
         --colors="$color" \
+        --cache="$CACHE_ID" \
         --output="$output"
     done
   done

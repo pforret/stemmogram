@@ -22,10 +22,10 @@ COLOR_PALETTES = {
         "other": (0, 145, 110),
     },
     "ocean": {
-        "vocals": (155, 34, 38),    # 9b2226
-        "bass": (0, 95, 115),       # 005f73
-        "drums": (238, 155, 0),     # ee9b00
-        "other": (10, 147, 150),    # 0a9396
+        "vocals": (213, 137, 111),  # d5896f
+        "bass": (4, 57, 94),        # 04395e
+        "drums": (218, 183, 133),   # dab785
+        "other": (112, 162, 136),   # 70a288
     },
 }
 WIDTH = 1920
@@ -47,12 +47,16 @@ def parse_args():
         help="Visualization mode: spectro, wave, spectro,wave, or mel (default: spectro,wave)"
     )
     parser.add_argument(
-        "--scale", default="log", choices=["lin", "log"],
-        help="Scaling method for waveform/spectrogram: lin or log (default: log)"
+        "--scale", default="log", choices=["lin", "log", "sqrt", "cbrt"],
+        help="Scaling method for waveform/spectrogram: lin, log, sqrt, or cbrt (default: log)"
     )
     parser.add_argument(
         "--colors", default="simple", choices=list(COLOR_PALETTES.keys()),
         help="Color palette: simple or ocean (default: simple)"
+    )
+    parser.add_argument(
+        "--cache", default=None,
+        help="Unique ID for caching stems (reuses stems if already separated)"
     )
     return parser.parse_args()
 
@@ -93,7 +97,7 @@ def extract_metadata(input_path: str) -> dict:
     bitrate_kbps = bitrate_bps // 1000
 
     # Integrated loudness (LUFS) via ebur128
-    loudness_str = "N/A"
+    lufs_value = None
     try:
         result = subprocess.run(
             [
@@ -109,7 +113,7 @@ def extract_metadata(input_path: str) -> dict:
         stderr = result.stderr
         match = re.search(r"I:\s+([-\d.]+)\s+LUFS", stderr)
         if match:
-            loudness_str = f"{float(match.group(1)):.1f} LUFS"
+            lufs_value = float(match.group(1))
     except Exception:
         pass
 
@@ -142,15 +146,26 @@ def extract_metadata(input_path: str) -> dict:
         "duration": duration_str,
         "duration_s": duration_s,
         "bitrate_kbps": bitrate_kbps,
-        "loudness": loudness_str,
+        "lufs": lufs_value,
         "sample_rate": sample_rate,
         "mean_volume": mean_volume,
         "max_volume": max_volume,
     }
 
 
-def separate_stems(input_path: str, tmp_dir: str) -> dict:
+def separate_stems(input_path: str, tmp_dir: str, cache_id: str = None) -> dict:
     """Run demucs htdemucs to separate audio into stems. Returns dict of stem name -> wav path."""
+    cache_dir = "/cache"
+
+    # Check if cached stems exist
+    if cache_id:
+        cached_stem_dir = os.path.join(cache_dir, cache_id)
+        cached_paths = {stem: os.path.join(cached_stem_dir, f"{stem}.wav") for stem in STEMS}
+        if all(os.path.isfile(p) for p in cached_paths.values()):
+            print(f"  Using cached stems from: {cached_stem_dir}")
+            return cached_paths
+
+    # Run demucs separation
     sep_dir = os.path.join(tmp_dir, "separated")
     subprocess.run(
         [
@@ -173,6 +188,17 @@ def separate_stems(input_path: str, tmp_dir: str) -> dict:
             print(f"ERROR: Expected stem file not found: {wav_path}", file=sys.stderr)
             sys.exit(1)
         stem_paths[stem] = wav_path
+
+    # Save to cache if cache_id provided
+    if cache_id:
+        import shutil
+        cached_stem_dir = os.path.join(cache_dir, cache_id)
+        os.makedirs(cached_stem_dir, exist_ok=True)
+        for stem, src_path in stem_paths.items():
+            dst_path = os.path.join(cached_stem_dir, f"{stem}.wav")
+            shutil.copy2(src_path, dst_path)
+            stem_paths[stem] = dst_path
+        print(f"  Cached stems to: {cached_stem_dir}")
 
     return stem_paths
 
@@ -254,6 +280,50 @@ def combine_stem_strips(wave_img: Image.Image, spec_img: Image.Image) -> Image.I
     return combined
 
 
+def create_lufs_meter(lufs_value: float, width: int = 200, height: int = 28, segments: int = 10) -> Image.Image:
+    """
+    Create LED-style LUFS meter visualization.
+    Range: -30 to 0 LUFS (3 LUFS per segment, 10 segments total)
+
+    LUFS color zones:
+      > -9   : red (too loud/clipped)
+      -9 to -12: orange (loud)
+      -12 to -18: green (ok)
+      < -18  : dark green (quiet)
+    """
+    img = Image.new("RGBA", (width, height), (255, 255, 255, 0))
+    draw = ImageDraw.Draw(img)
+
+    # Range: -30 to 0 LUFS, 3 LUFS per segment
+    clamped = max(-30, min(0, lufs_value))
+    lit_segments = int((clamped + 30) / 3)
+
+    gap = 2
+    seg_width = (width - (segments - 1) * gap) // segments
+
+    for i in range(segments):
+        x = i * (seg_width + gap)
+        # Each segment represents 3 LUFS: seg 0 = -30 to -27, seg 9 = -3 to 0
+        seg_lufs = -30 + (i + 1) * 3  # upper bound of this segment
+
+        if seg_lufs > -9:            # > -9 LUFS zone
+            color = (220, 50, 50)     # red
+        elif seg_lufs > -12:         # -9 to -12 LUFS zone
+            color = (255, 165, 0)     # orange
+        elif seg_lufs > -18:         # -12 to -18 LUFS zone
+            color = (50, 200, 50)     # green
+        else:
+            color = (30, 120, 30)     # dark green
+
+        if i < lit_segments:
+            draw.rectangle([x, 0, x + seg_width - 1, height - 1], fill=color + (255,))
+        else:
+            # Unlit segments: same color but 90% transparent
+            draw.rectangle([x, 0, x + seg_width - 1, height - 1], fill=color + (25,))
+
+    return img
+
+
 def create_header(filename: str, metadata: dict) -> Image.Image:
     """Create an 1920x80 header bar with metadata text."""
     header = Image.new("RGB", (WIDTH, HEADER_HEIGHT), "white")
@@ -275,7 +345,6 @@ def create_header(filename: str, metadata: dict) -> Image.Image:
 
     stats = (
         f"Duration: {metadata['duration']}    "
-        f"Loudness: {metadata['loudness']}    "
         f"Bitrate: {metadata['bitrate_kbps']} kbps    "
         f"Sample rate: {metadata['sample_rate']}    "
         f"Mean vol: {metadata['mean_volume']}    "
@@ -293,6 +362,25 @@ def create_header(filename: str, metadata: dict) -> Image.Image:
     ref_bbox = draw.textbbox((0, 0), ref_text, font=ref_font)
     ref_w = ref_bbox[2] - ref_bbox[0]
     draw.text((WIDTH - ref_w - 20, 10), ref_text, fill="gray", font=ref_font)
+
+    # LUFS meter below project name
+    lufs = metadata.get("lufs")
+    if lufs is not None:
+        meter_width = 160
+        meter_height = 28
+        meter_img = create_lufs_meter(lufs, meter_width, meter_height)
+        meter_x = WIDTH - meter_width - 20
+        meter_y = 28
+        header.paste(meter_img, (meter_x, meter_y), meter_img)
+        # LUFS value text to the left of meter
+        lufs_text = f"{lufs:.1f} LUFS"
+        try:
+            lufs_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 18)
+        except OSError:
+            lufs_font = label_font
+        lufs_bbox = draw.textbbox((0, 0), lufs_text, font=lufs_font)
+        lufs_w = lufs_bbox[2] - lufs_bbox[0]
+        draw.text((meter_x - lufs_w - 10, meter_y + 4), lufs_text, fill="gray", font=lufs_font)
 
     return header
 
@@ -354,12 +442,13 @@ def main():
     # Step 1: Extract metadata
     print("Extracting metadata...")
     metadata = extract_metadata(input_path)
-    print(f"  Duration: {metadata['duration']}, Bitrate: {metadata['bitrate_kbps']} kbps, Loudness: {metadata['loudness']}")
+    lufs_str = f"{metadata['lufs']:.1f} LUFS" if metadata['lufs'] is not None else "N/A"
+    print(f"  Duration: {metadata['duration']}, Bitrate: {metadata['bitrate_kbps']} kbps, Loudness: {lufs_str}")
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         # Step 2: Separate stems
         print("Separating stems with htdemucs...")
-        stem_paths = separate_stems(input_path, tmp_dir)
+        stem_paths = separate_stems(input_path, tmp_dir, args.cache)
 
         # Step 3: Generate and tint spectrograms/waveforms
         tinted = []
